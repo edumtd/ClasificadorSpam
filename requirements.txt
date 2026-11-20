@@ -1,0 +1,9 @@
+pandas==2.3.3
+numpy==2.2.6
+scikit-learn==1.7.2
+nltk==3.10.4
+joblib==1.6.0
+# Solo para el notebook (gráficas y kernel de Jupyter)
+matplotlib==3.10.9
+seaborn==0.13.2
+ipykernel==7.3.0

@@ -93,7 +93,7 @@ La implementación comparativa de estos tres algoritmos permite:
 
 ### 3.1 Pipeline de Procesamiento
 
-El desarrollo del clasificador sigue un pipeline estructurado en tres etapas principales:
+El desarrollo del clasificador sigue un pipeline estructurado en cinco etapas:
 
 #### **Fase 0: Preprocesamiento y Limpieza del Texto**
 
@@ -135,7 +135,17 @@ Esta etapa es crucial para la calidad de los resultados finales. El texto crudo 
 **Impacto del preprocesamiento:**
 Esta fase reduce significativamente la dimensionalidad del espacio de características mientras preserva la información semántica relevante, resultando en modelos más eficientes y precisos.
 
-#### **Fase 1: Vectorización TF-IDF**
+#### **Fase 1: División Train/Test**
+
+**División de datos:**
+- **Conjunto de entrenamiento**: 70% de los datos (3,545 mensajes)
+- **Conjunto de prueba**: 30% de los datos (1,520 mensajes)
+- **Método**: División estratificada (`stratify=y`), de modo que ambos conjuntos conservan la misma proporción de spam (11.5%)
+- **Random seed**: 42 (para reproducibilidad)
+
+La división se realiza **antes** de la vectorización. Esto es importante: si TF-IDF se ajusta con todo el dataset, el vocabulario y los pesos IDF incorporan información del conjunto de prueba y la evaluación deja de ser imparcial (*data leakage*). Una versión anterior del proyecto cometía este error.
+
+#### **Fase 2: Vectorización TF-IDF**
 
 Los modelos de aprendizaje automático requieren representaciones numéricas. TF-IDF (Term Frequency-Inverse Document Frequency) es el método estándar para convertir texto en vectores.
 
@@ -143,17 +153,23 @@ Los modelos de aprendizaje automático requieren representaciones numéricas. TF
 
 1. **TF (Term Frequency)**
    - Mide la frecuencia de un término en un documento
-   - Formula: TF(t,d) = (Número de veces que el término t aparece en el documento d) / (Total de términos en d)
+   - Se usa la versión sublineal: TF(t,d) = 1 + log(frecuencia de t en d), para que una palabra repetida muchas veces no domine el vector
 
 2. **IDF (Inverse Document Frequency)**
    - Penaliza términos que aparecen en muchos documentos
-   - Formula: IDF(t) = log(N / df(t))
+   - Formula (versión suavizada de scikit-learn): IDF(t) = log((1 + N) / (1 + df(t))) + 1
      - N = número total de documentos
      - df(t) = número de documentos que contienen el término t
 
 3. **TF-IDF Score**
-   - Combinación: TF-IDF(t,d) = TF(t,d) × IDF(t)
+   - Combinación: TF-IDF(t,d) = TF(t,d) × IDF(t), y cada vector se normaliza a longitud 1
    - Interpretación: Un término tiene alta importancia si aparece frecuentemente en un documento específico pero raramente en el corpus general
+
+**Configuración utilizada:**
+- `ngram_range=(1, 2)`: se usan palabras individuales y **pares de palabras** (bigramas), como "free entri" o "call now", que capturan expresiones típicas del spam
+- `sublinear_tf=True`: TF logarítmico
+- `min_df=2`: se ignoran términos que aparecen en un solo mensaje (ruido, errores de escritura)
+- `dtype=float32`: reduce a la mitad la memoria de la matriz
 
 **Ventajas de TF-IDF:**
 - Captura la importancia contextual de las palabras
@@ -162,47 +178,56 @@ Los modelos de aprendizaje automático requieren representaciones numéricas. TF
 - Estándar en la industria para clasificación de texto
 
 **Resultado:**
-Matriz de características de dimensión (n_documentos × n_vocabulario) donde cada documento es representado como un vector numérico.
+Matriz de características de dimensión (n_documentos × n_vocabulario) donde cada documento es representado como un vector numérico. Con el conjunto de entrenamiento se obtiene un vocabulario de 4,799 términos (unigramas y bigramas).
 
-#### **Fase 2: División y Entrenamiento**
+#### **Fase 3: Entrenamiento**
 
-**División de datos:**
-- **Conjunto de entrenamiento**: 70% de los datos (3,896 mensajes)
-- **Conjunto de prueba**: 30% de los datos (1,670 mensajes)
-- **Método**: Estratificación para preservar proporciones de clases
-- **Random seed**: 42 (para reproducibilidad)
+Cada modelo se implementa como un `Pipeline` de scikit-learn (TF-IDF → clasificador), lo que garantiza que la vectorización se ajuste únicamente con los datos de entrenamiento, también dentro de la validación cruzada.
 
 **Proceso de entrenamiento:**
 1. Los tres modelos (NB, kNN, SVM) se entrenan **independientemente** con los mismos datos de entrenamiento
-2. Se utilizan configuraciones estándar:
-   - **Naive Bayes**: MultinomialNB con parámetros por defecto
-   - **kNN**: k=5 vecinos (valor estándar balanceado)
-   - **SVM**: LinearSVC con max_iter=1000
+2. Configuraciones utilizadas:
+   - **Naive Bayes**: MultinomialNB con suavizado `alpha=0.1`
+   - **kNN**: k=5 vecinos, **distancia coseno** y voto ponderado por distancia
+   - **SVM**: LinearSVC con C=1.0
 
 3. Cada modelo aprende a distinguir patrones spam vs ham basándose en las representaciones TF-IDF
+
+**Elección de la distancia en kNN:** la distancia euclidiana (la predeterminada) se ve afectada por la longitud de los mensajes y por la alta dimensionalidad. La distancia coseno compara la *orientación* de los vectores, es decir, qué palabras contienen y en qué proporción, y es la medida estándar para comparar documentos en Recuperación de Información.
+
+#### **Fase 4: Evaluación**
+
+1. Evaluación en el conjunto de prueba (1,520 mensajes) con precision, recall, F1 y matriz de confusión
+2. **Validación cruzada estratificada de 5 particiones** sobre todo el dataset, para medir la variabilidad de los resultados y no depender de una sola división
 
 ### 3.2 Conjunto de Datos
 
 **Características del dataset utilizado:**
 - **Fuente**: SMS Spam Collection Dataset
 - **Tamaño total**: 5,572 mensajes SMS
-- **Mensajes procesados**: 5,566 (6 mensajes eliminados por estar vacíos tras limpieza)
-- **Distribución de clases**:
-  - Ham: 4,819 mensajes (86.6%)
-  - Spam: 747 mensajes (13.4%)
+- **Mensajes eliminados**: 507
+  - 6 mensajes quedan vacíos tras la limpieza
+  - 501 mensajes son **duplicados** (idénticos tras la limpieza)
+- **Mensajes utilizados**: 5,065
+- **Distribución de clases (tras eliminar duplicados)**:
+  - Ham: 4,481 mensajes (88.5%)
+  - Spam: 584 mensajes (11.5%)
+
+**¿Por qué eliminar duplicados?**
+El dataset contiene muchos mensajes repetidos, sobre todo promociones de spam enviadas a varios destinatarios: de los 747 mensajes de spam originales, 163 son repeticiones. Si un mensaje repetido cae a la vez en entrenamiento y en prueba, el modelo se evalúa con un ejemplo que ya vio, lo que infla las métricas. Eliminarlos da una estimación más honesta de cómo se comportaría el sistema con mensajes nuevos.
 
 **Análisis del desequilibrio:**
-El dataset presenta un desequilibrio moderado hacia la clase ham (ratio ~6.5:1). Aunque no ideal, este desequilibrio refleja la distribución real del problema, donde el spam suele ser menos frecuente que los mensajes legítimos.
+El dataset presenta un desequilibrio moderado hacia la clase ham (ratio ~7.7:1). Aunque no ideal, este desequilibrio refleja la distribución real del problema, donde el spam suele ser menos frecuente que los mensajes legítimos. Por esta razón, el modelo ganador se elige por el **F1 de la clase spam** y no por el accuracy: un clasificador que respondiera "ham" a todo tendría 88.5% de accuracy sin detectar un solo spam.
 
 **Calidad de las etiquetas:**
 - Dataset pre-etiquetado manualmente
-- Etiquetas validadas por expertos
 - Sin necesidad de generación artificial de datos
 
 **Características textuales:**
-- Longitud promedio variable (desde mensajes cortos hasta párrafos)
+- Longitud variable (desde mensajes de una palabra hasta párrafos)
 - Lenguaje: Inglés informal (SMS)
-- Vocabulario único tras limpieza: 7,148 palabras
+- Vocabulario único tras limpieza: 7,103 palabras
+- Promedio de 8.9 palabras por mensaje tras la limpieza
 
 ### 3.3 Métricas de Evaluación
 
@@ -293,177 +318,201 @@ Real Spam           FN              VP
 
 ### 4.1 Rendimiento General de los Modelos
 
-Tras el entrenamiento y evaluación en el conjunto de prueba (1,670 mensajes), se obtuvieron los siguientes resultados:
+Tras el entrenamiento y evaluación en el conjunto de prueba (1,520 mensajes: 1,345 ham y 175 spam), se obtuvieron los siguientes resultados:
 
-#### **Ranking por Accuracy:**
-1. 🥇 **SVM**: 98.39% accuracy
-2. 🥈 **Naive Bayes**: 96.71% accuracy
-3. 🥉 **kNN**: 91.27% accuracy
+#### **Ranking por F1 de spam (conjunto de prueba):**
+
+| Posición | Modelo | Accuracy | F1 spam |
+|---|---|---|---|
+| 🥇 | **Naive Bayes** | 97.96% | 0.9086 |
+| 🥈 | **SVM** | 97.83% | 0.9032 |
+| 🥉 | **kNN** | 96.97% | 0.8544 |
+
+#### **Validación cruzada estratificada (5 particiones):**
+
+| Modelo | Accuracy (media ± desv.) | F1 macro (media ± desv.) |
+|---|---|---|
+| Naive Bayes | 98.05% ± 0.48 | 0.9494 ± 0.0135 |
+| SVM | 97.95% ± 0.43 | 0.9467 ± 0.0121 |
+| kNN | 97.04% ± 0.57 | 0.9187 ± 0.0180 |
+
+La diferencia entre Naive Bayes y SVM (0.1 puntos de accuracy) es mucho menor que la variación entre particiones (~0.45 puntos), por lo que **ambos modelos deben considerarse empatados**. kNN queda claramente por debajo.
 
 ### 4.2 Análisis Detallado por Modelo
 
-#### 4.2.1 Support Vector Machine (SVM) - CAMPEÓN
+#### 4.2.1 Naive Bayes - Primer Lugar (empatado con SVM)
 
 **Métricas globales:**
-- **Accuracy**: 98.39%
+- **Accuracy**: 97.96%
+- **Rendimiento**: Excelente, especialmente considerando su simplicidad
+
+**Desempeño por clase:**
+
+**Clase Ham:**
+- Precision: 98.45%
+- Recall: 99.26%
+- F1-Score: 98.85%
+
+**Clase Spam:**
+- Precision: 93.90%
+- Recall: 88.00%
+- F1-Score: 90.86%
+
+**Matriz de Confusión:**
+```
+                Predicho Ham    Predicho Spam
+Real Ham          1,335            10
+Real Spam            21           154
+```
+
+**Análisis de errores:**
+- 10 falsos positivos (ham clasificado como spam)
+- 21 falsos negativos (spam no detectado)
+
+**Fortalezas:**
+- Mejor F1 de spam y mejor accuracy media en validación cruzada
+- Muy rápido en entrenamiento y predicción
+- Fue el único modelo que clasificó correctamente los 5 mensajes nuevos de prueba (sección 4.4)
+
+**Conclusión Naive Bayes:**
+Con el suavizado ajustado (`alpha=0.1`) y bigramas, Naive Bayes alcanza el rendimiento de SVM. Su simplicidad y rapidez lo hacen ideal para aplicaciones en tiempo real con volumen alto de mensajes.
+
+#### 4.2.2 Support Vector Machine (SVM) - Primer Lugar (empatado con Naive Bayes)
+
+**Métricas globales:**
+- **Accuracy**: 97.83%
 - **Rendimiento general**: Excelente en ambas clases
 
 **Desempeño por clase:**
 
 **Clase Ham:**
-- Precision: 98%
-- Recall: 100%
-- F1-Score: 99%
-- Interpretación: Clasifica perfectamente todos los mensajes legítimos
+- Precision: 98.45%
+- Recall: 99.11%
+- F1-Score: 98.78%
 
 **Clase Spam:**
-- Precision: 99%
-- Recall: 88%
-- F1-Score: 93%
-- Interpretación: Muy alta precisión, detecta 88% del spam
+- Precision: 92.77%
+- Recall: 88.00%
+- F1-Score: 90.32%
 
 **Matriz de Confusión:**
 ```
                 Predicho Ham    Predicho Spam
-Real Ham          1,446             2
-Real Spam           26            196
+Real Ham          1,333            12
+Real Spam            21           154
 ```
 
 **Análisis de errores:**
-- Solo 2 falsos positivos (ham clasificado como spam)
-- 26 falsos negativos (spam que pasó como ham)
-- Excelente balance entre precisión y recall
+- 12 falsos positivos (ham clasificado como spam)
+- 21 falsos negativos (spam que pasó como ham)
+- Detecta exactamente el mismo número de spam que Naive Bayes (154 de 175)
 
 **Conclusión SVM:**
-El modelo cumple las expectativas, demostrando ser el más efectivo. Su capacidad para encontrar el hiperplano óptimo resulta en la mejor separación entre clases.
-
-#### 4.2.2 Naive Bayes - Segundo Lugar
-
-**Métricas globales:**
-- **Accuracy**: 96.71%
-- **Rendimiento**: Muy bueno, especialmente considerando su simplicidad
-
-**Desempeño por clase:**
-
-**Clase Ham:**
-- Precision: 96%
-- Recall: 100%
-- F1-Score: 98%
-
-**Clase Spam:**
-- Precision: 100%
-- Recall: 76%
-- F1-Score: 86%
-
-**Matriz de Confusión:**
-```
-                Predicho Ham    Predicho Spam
-Real Ham          1,436             0
-Real Spam           55            177
-```
-
-**Análisis de errores:**
-- Cero falsos positivos (ningún ham clasificado como spam)
-- 55 falsos negativos (spam no detectado)
-
-**Fortalezas:**
-- Perfecta precision en spam (100%)
-- No molesta a usuarios con falsos positivos
-- Muy rápido en entrenamiento y predicción
-
-**Debilidades:**
-- Recall de spam moderado (76%)
-- Deja pasar más spam que SVM
-
-**Conclusión Naive Bayes:**
-Excelente opción para sistemas donde es crítico evitar falsos positivos. Su simplicidad y rapidez lo hacen ideal para aplicaciones en tiempo real con volumen alto de mensajes.
+SVM es el modelo más estable (menor desviación estándar en validación cruzada) y obtiene el mejor resultado cuando se conservan los duplicados (sección 4.6), pero sobre datos sin duplicados no supera a Naive Bayes.
 
 #### 4.2.3 k-Nearest Neighbours (kNN) - Tercer Lugar
 
 **Métricas globales:**
-- **Accuracy**: 91.27%
-- **Rendimiento**: Aceptable pero inferior a los otros modelos
+- **Accuracy**: 96.97%
+- **Rendimiento**: Bueno, pero inferior a los otros modelos
 
 **Desempeño por clase:**
 
 **Clase Ham:**
-- Precision: 91%
-- Recall: 100%
-- F1-Score: 95%
+- Precision: 97.10%
+- Recall: 99.55%
+- F1-Score: 98.31%
 
 **Clase Spam:**
-- Precision: 100%
-- Recall: 32%
-- F1-Score: 49%
+- Precision: 95.74%
+- Recall: 77.14%
+- F1-Score: 85.44%
 
 **Matriz de Confusión:**
 ```
                 Predicho Ham    Predicho Spam
-Real Ham          1,436             0
-Real Spam          152             72
+Real Ham          1,339             6
+Real Spam            40           135
 ```
 
 **Análisis de errores:**
-- Cero falsos positivos
-- 152 falsos negativos (65% del spam no detectado)
+- Solo 6 falsos positivos (el menor de los tres modelos)
+- 40 falsos negativos (23% del spam no detectado)
 
 **Fortalezas:**
-- Precision perfecta cuando clasifica algo como spam
-- No genera falsos positivos
+- La mayor precision de spam: casi nunca marca como spam un mensaje legítimo
+- Mejoró drásticamente con la distancia coseno: en la versión anterior (distancia euclidiana) solo detectaba el 32% del spam
 
-**Debilidades críticas:**
-- Recall de spam muy bajo (32%)
-- Deja pasar la mayoría del spam
-- Computacionalmente más costoso
+**Debilidades:**
+- Recall de spam más bajo que los otros modelos (77%)
+- Es el más lento en predicción, porque compara cada mensaje con todos los de entrenamiento
 
 **Conclusión kNN:**
-Aunque no genera falsos positivos, su bajo recall lo hace inadecuado para detección de spam donde es esencial capturar la mayor cantidad posible de mensajes maliciosos.
+Con una métrica de distancia adecuada para texto, kNN se vuelve competitivo, aunque sigue dejando pasar más spam que Naive Bayes y SVM.
 
 ### 4.3 Comparación Visual
 
 ```
-Accuracy Comparison:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SVM           ████████████████████ 98.39%
-Naive Bayes   ███████████████████  96.71%
-kNN           █████████████████    91.27%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Accuracy en validación cruzada (media de 5 particiones):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Naive Bayes   ████████████████████ 98.05%
+SVM           ████████████████████ 97.95%
+kNN           ███████████████████  97.04%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+El notebook `clasificador_spam.ipynb` incluye la gráfica de barras con las desviaciones estándar y las matrices de confusión de los tres modelos.
 
 ### 4.4 Prueba con Mensajes Nuevos
 
-Para validar la aplicabilidad práctica, se probaron los modelos con 4 mensajes nuevos:
+Para validar la aplicabilidad práctica, se probaron los modelos con 5 mensajes nuevos que no forman parte del dataset:
 
-**Mensaje 1:** "Congratulations! You've won a FREE prize worth $1000. Click here to claim now!"
-- **Clasificación SVM**: SPAM ✅
-- **Análisis**: Correctamente identificado por palabras clave típicas de spam
+| # | Mensaje | Naive Bayes | SVM | Esperado |
+|---|---|---|---|---|
+| 1 | "Congratulations! You've won a FREE prize worth $1000. Click here to claim now!" | SPAM ✅ | SPAM ✅ | SPAM |
+| 2 | "Hey, are we still meeting for lunch tomorrow?" | HAM ✅ | HAM ✅ | HAM |
+| 3 | "URGENT: Your account will be suspended unless you verify your details immediately" | SPAM ✅ | HAM ⚠️ | SPAM |
+| 4 | "Thanks for the notes from class. See you on Monday!" | HAM ✅ | HAM ✅ | HAM |
+| 5 | "URGENT HOLAA NECESITAS DINERO YO PUEDO AYUDARTE" | SPAM ✅ | HAM ⚠️ | SPAM |
 
-**Mensaje 2:** "Hey, are we still meeting for lunch tomorrow?"
-- **Clasificación SVM**: HAM ✅
-- **Análisis**: Conversación natural correctamente clasificada
-
-**Mensaje 3:** "URGENT: Your account will be suspended unless you verify your details immediately"
-- **Clasificación SVM**: HAM ⚠️ (Debería ser SPAM)
-- **Análisis**: Falso negativo - ejemplo de mensaje de phishing no detectado
-
-**Mensaje 4:** "Thanks for the notes from class. See you on Monday!"
-- **Clasificación SVM**: HAM ✅
-- **Análisis**: Mensaje genuino correctamente identificado
+**Análisis:**
+- El mensaje 3 es un intento de **phishing**, un tipo de spam poco representado en el dataset (que contiene sobre todo promociones y concursos). SVM no lo detecta; Naive Bayes sí, apoyándose en la palabra "urgent".
+- El mensaje 5 está en **español**, idioma ausente del dataset: casi todas sus palabras son desconocidas para el modelo, y la clasificación depende únicamente de "urgent". Que Naive Bayes acierte es en buena parte casualidad, no evidencia de que funcione en español.
 
 **Conclusión de pruebas:**
-El modelo funciona correctamente en la mayoría de casos reales, aunque aún existen casos límite que podrían mejorarse.
+Los modelos funcionan correctamente con mensajes similares a los del dataset, pero son frágiles ante tipos de spam o idiomas que no vieron durante el entrenamiento.
 
 ### 4.5 Verificación de Hipótesis
 
 **Hipótesis inicial:** "Se espera que SVM sea el mejor algoritmo para clasificación de spam"
 
-**Resultado:** ✅ **CONFIRMADA**
+**Resultado:** ❌ **NO CONFIRMADA** (SVM empata con Naive Bayes, pero no lo supera)
 
 **Evidencia:**
-1. SVM obtuvo la mayor accuracy (98.39%)
-2. Mejor balance entre precision y recall
-3. Menor número total de errores
-4. Superior capacidad de generalización
+1. En el conjunto de prueba, Naive Bayes obtiene un F1 de spam ligeramente mayor (0.9086 vs 0.9032)
+2. En validación cruzada, la diferencia entre ambos (0.1 puntos de accuracy) es menor que la variación entre particiones
+3. Ambos detectan exactamente la misma cantidad de spam (154 de 175)
+4. SVM sí es superior cuando se evalúa con los duplicados incluidos, lo que explica la conclusión de la versión anterior del proyecto (ver 4.6)
+
+### 4.6 Comparación con la Versión Anterior del Proyecto
+
+Una primera versión del proyecto reportaba resultados distintos. Las diferencias se deben a tres problemas de metodología que se corrigieron:
+
+| Modelo | Versión anterior | Corregida, con duplicados | **Corregida, sin duplicados** |
+|---|---|---|---|
+| SVM | 98.39% | 98.26% | **97.83%** |
+| Naive Bayes | 96.71% | 98.14% | **97.96%** |
+| kNN | 91.27% | 97.66% | **96.97%** |
+
+**Problemas corregidos:**
+1. **Fuga de información (*data leakage*)**: TF-IDF se ajustaba con todo el dataset, incluido el conjunto de prueba. Ahora se ajusta solo con el entrenamiento mediante `Pipeline`.
+2. **Mensajes duplicados**: 501 mensajes repetidos podían quedar en entrenamiento y prueba al mismo tiempo, inflando los resultados (en especial los de SVM).
+3. **División no estratificada**: la proporción de spam podía variar entre entrenamiento y prueba.
+
+**Mejoras de configuración:**
+- kNN con distancia coseno y voto ponderado (de 91.27% a 96.97%)
+- Naive Bayes con `alpha=0.1` en lugar de 1.0 (suavizado excesivo para un vocabulario grande)
+- TF-IDF con bigramas, TF sublineal y `min_df=2`
 
 ---
 
@@ -471,35 +520,37 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 
 ### 5.1 Interpretación de Resultados
 
-#### ¿Por qué SVM es superior?
+#### ¿Por qué Naive Bayes y SVM empatan?
 
 **Razones técnicas:**
-1. **Capacidad de separación**: El hiperplano de máximo margen es óptimo para este problema linealmente separable en espacio TF-IDF
-2. **Robustez en alta dimensionalidad**: 7,148 características se manejan eficientemente
-3. **Resistencia al sobreajuste**: La maximización del margen previene ajuste excesivo a ruido
+1. **El problema es casi linealmente separable**: en el espacio TF-IDF, el spam se distingue por un conjunto reducido de términos muy característicos ("free", "txt", "claim", "prize", números cortos de servicio). Tanto SVM (una frontera lineal) como Naive Bayes (que también define una frontera lineal en el espacio logarítmico) separan bien estas clases.
+2. **Naive Bayes funciona bien con textos cortos**: la asunción de independencia entre palabras se viola menos en mensajes de ~9 palabras que en documentos largos.
+3. **El suavizado importa**: con `alpha=1.0` (valor por defecto), Naive Bayes asigna demasiada probabilidad a palabras no vistas y pierde recall de spam; con `alpha=0.1` alcanza a SVM.
 
 **Razones empíricas:**
-- Los vectores TF-IDF de spam y ham son suficientemente distintos para permitir separación lineal
-- El corpus tiene suficientes ejemplos para entrenar un modelo complejo
+- Ambos modelos dejan pasar 21 mensajes de spam, y 15 de ellos son los mismos. Esto sugiere que la mayoría de los errores corresponden a mensajes intrínsecamente difíciles más que a debilidades de un algoritmo en particular.
 
-#### ¿Por qué kNN tiene bajo rendimiento?
+#### ¿Por qué kNN queda en tercer lugar?
 
 **Limitaciones identificadas:**
-1. **Maldición de la dimensionalidad**: En espacios de 7,148 dimensiones, la noción de "cercanía" se degrada
-2. **Desequilibrio de clases**: Con 6:1 ratio ham:spam, los vecinos tienden a ser ham
-3. **Costo computacional**: Requiere calcular distancias a todos los ejemplos de entrenamiento
+1. **Maldición de la dimensionalidad**: en un espacio de miles de dimensiones, la mayoría de los mensajes están "lejos" de todos los demás, y los vecinos más cercanos son menos informativos
+2. **Desequilibrio de clases**: con una proporción de ~7.7:1 ham:spam, los vecinos tienden a ser ham, lo que reduce el recall de spam
+3. **Costo computacional**: requiere comparar cada mensaje nuevo con todos los de entrenamiento
 
-#### Naive Bayes como alternativa práctica
+**El papel de la métrica de distancia:**
+La mejora de 91.27% a 96.97% al cambiar de distancia euclidiana a coseno muestra que el bajo rendimiento anterior de kNN se debía principalmente a una métrica inadecuada para texto, no al algoritmo en sí.
+
+#### Naive Bayes como opción práctica
 
 **Ventajas prácticas:**
-- **Velocidad**: 100x más rápido que SVM en entrenamiento
-- **Eficiencia**: Requiere menos memoria
-- **Trade-off aceptable**: Solo 1.68% menos accuracy que SVM
+- **Rendimiento**: empata con SVM en este problema
+- **Velocidad**: entrenamiento y predicción en milisegundos
+- **Interpretabilidad**: las probabilidades por palabra permiten explicar por qué un mensaje se clasificó como spam
 
 **Casos de uso ideales:**
 - Sistemas con restricciones de recursos
 - Aplicaciones en tiempo real
-- Cuando la velocidad es crítica
+- Cuando se necesita explicar las decisiones
 
 ### 5.2 Análisis de Errores
 
@@ -507,11 +558,12 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 
 **Falsos Negativos (Spam clasificado como Ham):**
 - Mensajes de spam sofisticados que imitan lenguaje natural
-- Técnicas de ofuscación (espacios extra, caracteres especiales)
-- Spam contextual que requiere comprensión semántica profunda
+- Tipos de spam poco representados en el dataset (por ejemplo, phishing)
+- Técnicas de ofuscación (espacios extra, caracteres especiales, "fr33")
+- Mensajes en otros idiomas
 
 **Falsos Positivos (Ham clasificado como Spam):**
-- Mensajes legítimos con palabras típicas de spam ("free", "urgent")
+- Mensajes legítimos con palabras típicas de spam ("free", "urgent", "call")
 - Promociones comerciales legítimas
 - Alertas de seguridad genuinas
 
@@ -520,18 +572,23 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 1. **Dataset específico**: Resultados en SMS pueden no generalizarse a email
 2. **Idioma único**: Solo mensajes en inglés
 3. **Temporalidad**: Patrones de spam evolucionan con el tiempo
-4. **Configuraciones default**: No se realizó optimización de hiperparámetros
+4. **Hiperparámetros ajustados manualmente**: no se realizó una búsqueda sistemática (Grid Search)
+5. **Conjunto de prueba pequeño para spam**: 175 mensajes, por lo que una diferencia de 1–2 aciertos cambia el F1 en ~0.5 puntos
 
 ### 5.4 Desequilibrio de Clases
 
 **Impacto observado:**
-- Ratio 6.5:1 (ham:spam) es manejable
-- Modelos tienden a favorecer clase mayoritaria
-- Recall de spam es consistentemente menor que recall de ham
+- Ratio ~7.7:1 (ham:spam) tras eliminar duplicados
+- Los modelos tienden a favorecer la clase mayoritaria
+- El recall de spam (77–88%) es consistentemente menor que el recall de ham (99%)
+
+**Medidas aplicadas:**
+- División estratificada y validación cruzada estratificada
+- Selección del mejor modelo por F1 de spam en lugar de accuracy
 
 **Estrategias no implementadas:**
+- Ajuste de pesos de clase (`class_weight="balanced"`)
 - SMOTE (Synthetic Minority Over-sampling)
-- Ajuste de pesos de clase
 - Under-sampling de clase mayoritaria
 
 ---
@@ -540,25 +597,27 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 
 ### 6.1 Hallazgos Principales
 
-1. **SVM demostró ser el algoritmo superior** con 98.39% de accuracy, confirmando la hipótesis inicial
+1. **Naive Bayes y SVM empatan como mejores algoritmos** (~98% de accuracy, F1 de spam ≈ 0.90). La hipótesis de que SVM sería superior no se confirma.
 
-2. **Naive Bayes ofrece el mejor balance velocidad-precisión**, siendo ideal para aplicaciones con restricciones de recursos
+2. **Naive Bayes ofrece el mejor balance rendimiento-simplicidad**, siendo ideal para aplicaciones con restricciones de recursos o en tiempo real.
 
-3. **kNN no es adecuado para este problema** debido a la alta dimensionalidad y desequilibrio de clases
+3. **kNN es viable con la métrica de distancia correcta**: con distancia coseno alcanza ~97% de accuracy, aunque sigue detectando menos spam que los otros dos modelos.
 
-4. **El preprocesamiento de texto es crucial**: La limpieza, stemming y TF-IDF son fundamentales para el éxito del sistema
+4. **La metodología de evaluación importa tanto como el algoritmo**: la fuga de información y los mensajes duplicados cambiaban el orden de los modelos y la conclusión del estudio.
 
-5. **Trade-off precision-recall**: Diferentes aplicaciones requerirán diferentes balances según la tolerancia a falsos positivos vs falsos negativos
+5. **El preprocesamiento de texto es crucial**: la limpieza, el stemming y la configuración de TF-IDF son fundamentales para el éxito del sistema.
+
+6. **Trade-off precision-recall**: Diferentes aplicaciones requerirán diferentes balances según la tolerancia a falsos positivos vs falsos negativos.
 
 ### 6.2 Contribuciones del Proyecto
 
 **Académicas:**
-- Comparación empírica rigurosa de algoritmos clásicos
-- Validación de métodos de preprocesamiento
+- Comparación empírica de algoritmos clásicos con validación cruzada
+- Demostración del efecto de la fuga de información y los duplicados en la evaluación
 - Documentación detallada de metodología reproducible
 
 **Prácticas:**
-- Sistema funcional de detección de spam
+- Sistema funcional de detección de spam, con modelo guardable y reutilizable (`joblib`)
 - Código reutilizable para futuros proyectos
 - Guía de implementación para problemas similares
 
@@ -577,19 +636,19 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 ### 7.1 Mejoras Inmediatas
 
 1. **Optimización de hiperparámetros**
-   - Grid Search para encontrar k óptimo en kNN
-   - Ajuste de parámetro C en SVM
-   - Exploración de diferentes configuraciones de Naive Bayes
+   - `GridSearchCV` para encontrar el k óptimo en kNN
+   - Ajuste del parámetro C en SVM y de alpha en Naive Bayes
+   - Comparar distintos rangos de n-gramas
 
 2. **Balanceo de clases**
+   - `class_weight="balanced"` en SVM para aumentar el recall de spam
    - Implementar SMOTE
-   - Ajustar pesos de clase
    - Probar under-sampling
 
 3. **Ingeniería de características**
-   - Incluir n-gramas (bigramas, trigramas)
-   - Características de longitud de mensaje
-   - Análisis de patrones de puntuación
+   - N-gramas de caracteres (`analyzer="char_wb"`) para capturar ofuscaciones como "fr33" o "w1n"
+   - Conservar números y símbolos de moneda (teléfonos, precios), que son buenos indicadores de spam
+   - Características de longitud de mensaje y de patrones de puntuación
 
 ### 7.2 Extensiones Avanzadas
 
@@ -608,8 +667,8 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
    - Sistema multi-idioma
 
 4. **Detección en tiempo real**
+   - `HashingVectorizer` + `SGDClassifier` para entrenamiento incremental por lotes con memoria constante
    - Pipeline de procesamiento streaming
-   - Actualización incremental de modelos
 
 5. **Explicabilidad**
    - LIME/SHAP para interpretar predicciones
@@ -617,9 +676,9 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 
 ### 7.3 Validación Adicional
 
-1. **Cross-validation k-fold** para robustez estadística
-2. **Pruebas con otros datasets** (Enron Email, SpamAssassin)
-3. **Evaluación temporal**: entrenar con datos antiguos, probar con recientes
+1. **Pruebas con otros datasets** (Enron Email, SpamAssassin, Spambase)
+2. **Evaluación temporal**: entrenar con datos antiguos, probar con recientes
+3. **Pruebas estadísticas** (por ejemplo, test de McNemar) para determinar si la diferencia entre modelos es significativa
 4. **A/B testing** en ambiente de producción
 
 ---
@@ -649,60 +708,77 @@ El modelo funciona correctamente en la mayoría de casos reales, aunque aún exi
 ### Apéndice A: Especificaciones Técnicas
 
 **Entorno de desarrollo:**
-- Lenguaje: Python 3.11.9
+- Lenguaje: Python 3.10
 - IDE: Visual Studio Code con extensión Jupyter
 - Sistema Operativo: Windows
+- Entorno virtual: `.venv` (dependencias en `requirements.txt`)
 
 **Librerías principales:**
 ```
 pandas==2.3.3
-numpy==2.3.5
+numpy==2.2.6
 scikit-learn==1.7.2
-nltk==3.9.2
-matplotlib==3.10.7
+nltk==3.10.4
+joblib==1.6.0
+matplotlib==3.10.9
 seaborn==0.13.2
 ```
 
+**Ejecución:**
+```
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe clasificador_spam.py --cv 5
+```
+
+Opciones del script: `--datos` (archivo CSV o `SMSSpamCollection`), `--test` (proporción de prueba), `--cv` (particiones de validación cruzada), `--con-duplicados` y `--guardar` (guarda el mejor modelo con `joblib`).
+
 ### Apéndice B: Configuración de Modelos
+
+**TF-IDF (común a los tres modelos):**
+```python
+TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=2, dtype=np.float32)
+```
 
 **Naive Bayes:**
 ```python
-MultinomialNB(alpha=1.0, fit_prior=True)
+MultinomialNB(alpha=0.1)
 ```
 
 **kNN:**
 ```python
-KNeighborsClassifier(n_neighbors=5, metric='minkowski', p=2)
+KNeighborsClassifier(n_neighbors=5, metric="cosine", weights="distance")
 ```
 
 **SVM:**
 ```python
-LinearSVC(max_iter=1000, C=1.0, random_state=42)
+LinearSVC(C=1.0, random_state=42)
 ```
 
 ### Apéndice C: Estadísticas del Vocabulario
 
-- **Palabras únicas tras limpieza**: 7,148
-- **Promedio de palabras por mensaje (tras limpieza)**: ~8.5
-- **Palabra más frecuente**: "call" (aparece en 15% de mensajes)
-- **Top 5 palabras spam**: "free", "call", "txt", "claim", "prize"
-- **Top 5 palabras ham**: "ok", "go", "get", "know", "come"
+- **Palabras únicas tras limpieza**: 7,103
+- **Términos en el vocabulario TF-IDF** (unigramas + bigramas con `min_df=2`, conjunto de entrenamiento): 4,799
+- **Promedio de palabras por mensaje (tras limpieza)**: 8.9
+- **Palabras más frecuentes en spam** (número de mensajes): "call" (240), "£" (180), "free" (135), "txt" (118), "text" (100)
+- **Palabras más frecuentes en ham**: "u" (632), "im" (396), "go" (373), "get" (328), "come" (256)
+
+Nota: el símbolo "£" no se elimina en la limpieza porque `string.punctuation` solo contiene signos ASCII; resulta ser uno de los indicadores más fuertes de spam (premios y tarifas en libras).
 
 ### Apéndice D: Tiempo de Ejecución
 
-**Entrenamiento (3,896 mensajes):**
-- Naive Bayes: ~26ms
-- kNN: ~222ms
-- SVM: ~28ms
+**Entrenamiento (3,545 mensajes, incluye la vectorización TF-IDF):**
+- Naive Bayes: ~52 ms
+- kNN: ~51 ms
+- SVM: ~56 ms
 
-**Predicción (1,670 mensajes):**
-- Naive Bayes: <10ms
-- kNN: ~180ms
-- SVM: <15ms
+**Predicción (1,520 mensajes):**
+- Naive Bayes: ~16 ms
+- kNN: ~69 ms
+- SVM: ~16 ms
 
 **Preprocesamiento completo:**
-- Limpieza de texto: ~953ms
-- Vectorización TF-IDF: ~93ms
+- Limpieza de texto: ~160 ms (la versión anterior del documento reportaba ~950 ms; la mejora se debe a precompilar las expresiones regulares y guardar en caché el resultado del stemming)
 
 ---
 
@@ -760,4 +836,4 @@ LinearSVC(max_iter=1000, C=1.0, random_state=42)
 
 ---
 
-*Este documento presenta el desarrollo completo del proyecto de clasificación de spam mediante algoritmos de aprendizaje supervisado, demostrando la efectividad de Support Vector Machines como método superior para esta tarea.*
+*Este documento presenta el desarrollo completo del proyecto de clasificación de spam mediante algoritmos de aprendizaje supervisado, mostrando que Naive Bayes y Support Vector Machines alcanzan un rendimiento equivalente cuando la evaluación se realiza sin fuga de información.*
